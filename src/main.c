@@ -40,45 +40,41 @@
 uint16_t
 checksum(uint16_t *data, size_t size)
 {
-    uint32_t sum;
-
-    size /= 2;
-    sum = 0;
-    while (size-- > 0)
-        sum += data[size];
+    uint32_t sum = 0;
+    size_t data_len = size / 2;
+    for (size_t i = 0; i < data_len; i++)
+        sum += data[i];
     return ~((sum << 16 >> 16) + (sum >> 16));
 }
 
 int
 main()
 {
-    int sock;
-
-    // sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
-    sock = socket(AF_INET, SOCK_RAW, 1);
+    int sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     if (sock == -1)
     {
         perror("socket creation");
         return 1;
     }
 
-    /* int a[1] = {1}; */
-    /* if (setsockopt(sock, IPPROTO_IP, IP_HDRINCL, a, sizeof(int)) == -1) */
-    /* { */
-    /* 	perror("setsockopt"); */
-    /* 	return 1; */
-    /* } */
+    int a[1] = {1};
+    if (setsockopt(sock, IPPROTO_IP, IP_HDRINCL, a, sizeof(int)) == -1)
+    {
+    	perror("setsockopt");
+    	return 1;
+    }
 
     struct in_addr src_addr;
     struct in_addr dst_addr;
     inet_pton(AF_INET, "127.0.0.1", &src_addr);
     inet_pton(AF_INET, "127.0.0.1", &dst_addr);
 
+    printf("%x\n", sizeof(struct iphdr) + sizeof(struct icmphdr));
     struct iphdr ip_header = {
         .ihl = 5,  // 20 byte = 160 bit; 160 / 32 = 5
         .version = 4,
         .tos = 0,
-        .tot_len = sizeof(struct iphdr) + sizeof(struct icmphdr),
+        .tot_len = htons(sizeof(struct iphdr) + sizeof(struct icmphdr)),
         .id = 0,
         .frag_off = 0,
         .ttl = DEFAULT_TTL,
@@ -101,6 +97,12 @@ main()
     uint8_t msg_buf[sizeof(struct iphdr) + sizeof(struct icmphdr)];
     memcpy(msg_buf, &ip_header, sizeof(struct iphdr));
     memcpy(msg_buf + sizeof(struct iphdr), &icmp_header, sizeof(struct icmphdr));
+    for (int i = 0; i < sizeof(ip_header); i++)
+        printf("%02x ", msg_buf[i]);
+    printf(" | ");
+    for (int i = 0; i < sizeof(icmp_header); i++)
+        printf("%02x ", msg_buf[sizeof(ip_header) + i]);
+    printf("\n");
 
     struct addrinfo *result;
     if (getaddrinfo("127.0.0.1", NULL, NULL, &result) != 0)
@@ -123,7 +125,6 @@ main()
         return 1;
     }
 
-
     memset(msg_buf, 0, sizeof(msg_buf));
     printf("receiving\n");
     if (recvfrom(sock, &msg_buf, sizeof(msg_buf), 0, result->ai_addr, &result->ai_addrlen) == -1)
@@ -132,12 +133,19 @@ main()
         close(sock);
         return 1;
     }
-    for (int i = 0; i < sizeof(msg_buf); i++)
-        printf("%x ", msg_buf[i]);
+    for (int i = 0; i < sizeof(ip_header); i++)
+        printf("%02x ", msg_buf[i]);
+    printf(" | ");
+    for (int i = 0; i < sizeof(icmp_header); i++)
+        printf("%02x ", msg_buf[sizeof(ip_header) + i]);
     printf("\n");
 
+    // memcpy(&ip_header, msg_buf, sizeof(ip_header));
+    // memcpy(&icmp_header, msg_buf + sizeof(ip_header), sizeof(icmp_header));
+    //
+    // ip_header.tot_len = ntohs(ip_header.tot_len);
+    // printf("ip_header.tot_len=%d\n", ip_header.tot_len);
 
     close(sock);
-
     return 0;
 }
