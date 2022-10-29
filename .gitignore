@@ -1,3 +1,5 @@
 *.o
 a.out
 ft_ping
+build
+.cache
