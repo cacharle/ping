@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DEFAULT_TTL 64
@@ -40,6 +41,12 @@
 ** ~0001110
 **  1110001
 */
+
+void
+put_error(char *msg)
+{
+    fprintf(stderr, "ping: %s: %s\n", msg, strerror(errno));
+}
 
 void
 die(const char *fmt, ...)
@@ -79,41 +86,38 @@ static int                sock = -1;
 static struct ping_packet send_packet;
 static struct ping_packet recv_packet;
 static struct addrinfo   *destination_addrinfo;
-struct in_addr            dst_addr;
-struct in_addr            src_addr;
+static struct in_addr     dst_addr;
+static struct in_addr     src_addr;
+static uint16_t           current_sequence = 1;
+static struct timespec    start_time;
 
 void
 ping(int signalnum)
 {
     (void)signalnum;
 
-    // printf("%x\n", sizeof(struct iphdr) + sizeof(struct icmphdr));
-    send_packet.ip.ihl =
-        5,  // Internet Header Length: 20 byte = 160 bit; 160 / 32 = 5
-        send_packet.ip.version = 4, send_packet.ip.tos = 0,
-    send_packet.ip.tot_len = htons(sizeof(struct iphdr) + sizeof(struct icmphdr)),
-    send_packet.ip.id = 0, send_packet.ip.frag_off = 0,
-    send_packet.ip.ttl = DEFAULT_TTL, send_packet.ip.protocol = IPPROTO_ICMP,
-    send_packet.ip.check = 0, send_packet.ip.saddr = src_addr.s_addr,
-    send_packet.ip.daddr = dst_addr.s_addr,
+    // Internet Header Length: 20 byte = 160 bit; 160 / 32 = 5
+    send_packet.ip.ihl = 5;
+    send_packet.ip.version = 4;
+    send_packet.ip.tos = 0;
+    send_packet.ip.tot_len = htons(sizeof(struct iphdr) + sizeof(struct icmphdr));
+    send_packet.ip.id = 0;
+    send_packet.ip.frag_off = 0;
+    send_packet.ip.ttl = DEFAULT_TTL;
+    send_packet.ip.protocol = IPPROTO_ICMP;
+    send_packet.ip.check = 0;
+    send_packet.ip.saddr = src_addr.s_addr;
+    send_packet.ip.daddr = dst_addr.s_addr;
     send_packet.ip.check =
         checksum((uint16_t *)&send_packet.ip, sizeof(send_packet.ip));
 
-    send_packet.icmp.type = ICMP_ECHO, send_packet.icmp.code = 0,
-    send_packet.icmp.checksum = 0, send_packet.icmp.un.echo.id = 0,
-    send_packet.icmp.un.echo.sequence = 1,
+    send_packet.icmp.type = ICMP_ECHO;
+    send_packet.icmp.code = 0;
+    send_packet.icmp.checksum = 0;
+    send_packet.icmp.un.echo.id = 0;
+    send_packet.icmp.un.echo.sequence = htons(current_sequence);
     send_packet.icmp.checksum =
         checksum((uint16_t *)&send_packet.icmp, sizeof(send_packet.icmp));
-
-    // uint8_t msg_buf[sizeof(struct iphdr) + sizeof(struct icmphdr)];
-    // memcpy(msg_buf, &ip_header, sizeof(struct iphdr));
-    // memcpy(msg_buf + sizeof(struct iphdr), &icmp_header, sizeof(struct icmphdr));
-    // for (int i = 0; i < sizeof(ip_header); i++)
-    //     printf("%02x ", msg_buf[i]);
-    // printf(" | ");
-    // for (int i = 0; i < sizeof(icmp_header); i++)
-    //     printf("%02x ", msg_buf[sizeof(ip_header) + i]);
-    // printf("\n");
 
     if (sendto(sock,
                &send_packet,
@@ -121,7 +125,9 @@ ping(int signalnum)
                0,
                destination_addrinfo->ai_addr,
                destination_addrinfo->ai_addrlen) == -1)
-        die("");
+        die("sendto");
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    current_sequence++;
     signal(SIGALRM, ping);
     alarm(1);
 }
@@ -176,14 +182,24 @@ main()
                      0,
                      destination_addrinfo->ai_addr,
                      &destination_addrinfo->ai_addrlen) == -1)
+        {
+            if (errno != EINTR)  // Not interupted by alarm signal
+                put_error("recvfrom");
             continue;
+        }
+        struct timespec end_time;
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+        end_time.tv_sec -= start_time.tv_sec;
+        end_time.tv_nsec -= start_time.tv_nsec;
+        float time_ms =
+            (float)end_time.tv_sec * 1000 + (float)end_time.tv_nsec / 1000000;
         printf("%zu bytes from %s (%s): icmp_seq=%d ttl=%d time=%.1f ms\n",
                sizeof(recv_packet),
                destination_hostname,
                inet_ntoa(dst_addr),
-               1,
-               1,
-               1.1);
+               ntohs(recv_packet.icmp.un.echo.sequence),
+               recv_packet.ip.ttl,
+               time_ms);
         // die("recv: %s", strerror(errno));
         // for (int i = 0; i < sizeof(recv_packet.ip); i++)
         //     printf("%02x ", ((uint8_t*)&recv_packet.ip)[i]);
