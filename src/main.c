@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 200112L
 #include <arpa/inet.h>
 #include <errno.h>
+#include <getopt.h>
+#include <limits.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -17,8 +19,6 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-
-#define DEFAULT_TTL 64
 
 /*
 ** https://www.youtube.com/watch?v=ppU41c15Xho
@@ -86,10 +86,13 @@ static int                sock = -1;
 static struct ping_packet send_packet;
 static struct ping_packet recv_packet;
 static struct addrinfo   *destination_addrinfo;
-static struct in_addr     dst_addr;
-static struct in_addr     src_addr;
+static struct in_addr     destination_ip_addr;
+static struct in_addr     source_ip_addr;
 static uint16_t           current_sequence = 1;
 static struct timespec    start_time;
+static unsigned long      packet_count = -1;
+static unsigned long      interval = 1;
+static unsigned long      ttl = 64;
 
 void
 ping(int signalnum)
@@ -103,11 +106,11 @@ ping(int signalnum)
     send_packet.ip.tot_len = htons(sizeof(struct iphdr) + sizeof(struct icmphdr));
     send_packet.ip.id = 0;
     send_packet.ip.frag_off = 0;
-    send_packet.ip.ttl = DEFAULT_TTL;
+    send_packet.ip.ttl = ttl;
     send_packet.ip.protocol = IPPROTO_ICMP;
     send_packet.ip.check = 0;
-    send_packet.ip.saddr = src_addr.s_addr;
-    send_packet.ip.daddr = dst_addr.s_addr;
+    send_packet.ip.saddr = source_ip_addr.s_addr;
+    send_packet.ip.daddr = destination_ip_addr.s_addr;
     send_packet.ip.check =
         checksum((uint16_t *)&send_packet.ip, sizeof(send_packet.ip));
 
@@ -128,15 +131,74 @@ ping(int signalnum)
         die("sendto");
     clock_gettime(CLOCK_MONOTONIC, &start_time);
     current_sequence++;
+    if (packet_count != -1)
+        packet_count--;
+    if (packet_count == 0)
+        return;
     signal(SIGALRM, ping);
-    alarm(1);
+    alarm(interval);
 }
 
 char *address = "google.com";
 
-int
-main()
+unsigned long
+parse_arg_ulong(char *arg)
 {
+    char *end;
+    errno = 0;
+    unsigned long ret = strtoul(optarg, &end, 10);
+    if (ret == -1UL)
+        errno = ERANGE;
+    if (errno != 0)
+        die("ping: invalid argument: '%s': %s\n", arg, strerror(errno));
+    if (*end != '\0')
+        die("ping: invalid argument: '%s'", arg);
+    return ret;
+}
+
+int
+main(int argc, char *argv[])
+{
+    int option;
+    while ((option = getopt(argc, argv, "c:s:i:At:I:W:w:qp:h")) != -1)
+    {
+        switch (option)
+        {
+        case 'c':
+            packet_count = parse_arg_ulong(optarg);
+            break;
+        case 's':
+            break;
+        case 'i':
+            interval = parse_arg_ulong(optarg);
+            if (interval > UINT_MAX)
+                die("ping: invalid argument: '%s': %s\n", optarg, strerror(ERANGE));
+            break;
+        case 'A':
+            break;
+        case 't':
+            ttl = parse_arg_ulong(optarg);
+            if (ttl > UINT8_MAX)
+                die("ping: invalid argument: '%s': %s\n", optarg, strerror(ERANGE));
+            break;
+        case 'I':
+            break;
+        case 'W':
+            break;
+        case 'w':
+            break;
+        case 'q':
+            break;
+        case 'p':
+            break;
+        case 'h':
+            break;
+        }
+    }
+    if (optind != argc - 1)
+        die("ping: usage error: Destination address required\n");
+    char *destination_address = argv[optind];
+
     // gethostname();
     sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     if (sock == -1)
@@ -149,8 +211,9 @@ main()
     hints.ai_family = AF_INET;
     hints.ai_socktype = 0;
     hints.ai_protocol = 0;
-    if (getaddrinfo(address, NULL, &hints, &destination_addrinfo) != 0)
-        die("ping: getaddrinfo failed: %s\n", strerror(errno));
+    int err = getaddrinfo(destination_address, NULL, &hints, &destination_addrinfo);
+    if (err != 0)
+        die("ping: %s: %s\n", destination_address, gai_strerror(err));
     char destination_hostname[1048] = "";
     getnameinfo(destination_addrinfo->ai_addr,
                 destination_addrinfo->ai_addrlen,
@@ -159,17 +222,9 @@ main()
                 NULL,
                 0,
                 0);
-    // for (struct addrinfo *r = destination_addrinfo; r != NULL; r = r->ai_next)
-    // {
-    //     char hostname[1084] = "";
-    //     getnameinfo(r->ai_addr, r->ai_addrlen, hostname, 1084, NULL, 0, 0);
-    //     struct in_addr addr = addrinfo_to_ip(r);
-    //     printf("hostname: %s (%s)\n", hostname, inet_ntoa(addr));
-    // }
 
-    dst_addr = addrinfo_to_ip(destination_addrinfo);
-    inet_pton(AF_INET, "192.168.1.42", &src_addr);
-    // inet_pton(AF_INET, address, &dst_addr);
+    destination_ip_addr = addrinfo_to_ip(destination_addrinfo);
+    inet_pton(AF_INET, "192.168.1.42", &source_ip_addr);
 
     signal(SIGALRM, ping);
     ping(0);
@@ -196,36 +251,13 @@ main()
         printf("%zu bytes from %s (%s): icmp_seq=%d ttl=%d time=%.1f ms\n",
                sizeof(recv_packet),
                destination_hostname,
-               inet_ntoa(dst_addr),
+               inet_ntoa(destination_ip_addr),
                ntohs(recv_packet.icmp.un.echo.sequence),
                recv_packet.ip.ttl,
                time_ms);
-        // die("recv: %s", strerror(errno));
-        // for (int i = 0; i < sizeof(recv_packet.ip); i++)
-        //     printf("%02x ", ((uint8_t*)&recv_packet.ip)[i]);
-        // printf(" | ");
-        // for (int i = 0; i < sizeof(recv_packet.icmp); i++)
-        //     printf("%02x ", ((uint8_t*)&recv_packet.ip)[sizeof(recv_packet.ip) +
-        //     i]);
-        // printf("\n");
+        if (packet_count == 0)
+            break;
     }
-
-    // f {
-    //     send();
-    //     signal(sigalrm, f);
-    //     alarm(interval_time);
-    // }
-    //
-    // f()
-    // while (1) {
-    //     recv
-    // }
-
-    // memcpy(&ip_header, msg_buf, sizeof(ip_header));
-    // memcpy(&icmp_header, msg_buf + sizeof(ip_header), sizeof(icmp_header));
-    //
-    // ip_header.tot_len = ntohs(ip_header.tot_len);
-    // printf("ip_header.tot_len=%d\n", ip_header.tot_len);
 
     freeaddrinfo(destination_addrinfo);
     close(sock);
