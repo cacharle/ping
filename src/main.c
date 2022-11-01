@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <limits.h>
+#include <math.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -19,6 +20,44 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+
+struct ping_packet
+{
+    struct iphdr   ip;
+    struct icmphdr icmp;
+};
+
+static int                sock = -1;
+static struct ping_packet send_packet;
+static struct ping_packet recv_packet;
+static struct addrinfo   *destination_addrinfo;
+static struct in_addr     destination_ip_addr;
+static struct in_addr     source_ip_addr;
+static uint16_t           current_sequence = 1;
+static struct timespec    start_time;
+static unsigned long      packet_count = -1;
+static unsigned long      interval = 1;
+static unsigned long      ttl = 64;
+static double             min_time_ms = INFINITY;
+static double             max_time_ms = -INFINITY;
+static double             sum_time_ms = 0;
+static size_t             recv_count = 0;
+
+void
+put_error(char *msg)
+{
+    fprintf(stderr, "ping: %s: %s\n", msg, strerror(errno));
+}
+
+void
+die(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    exit(EXIT_FAILURE);
+}
 
 /*
 ** https://www.youtube.com/watch?v=ppU41c15Xho
@@ -42,22 +81,6 @@
 **  1110001
 */
 
-void
-put_error(char *msg)
-{
-    fprintf(stderr, "ping: %s: %s\n", msg, strerror(errno));
-}
-
-void
-die(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-    exit(EXIT_FAILURE);
-}
-
 uint16_t
 checksum(uint16_t *data, size_t size)
 {
@@ -76,23 +99,25 @@ addrinfo_to_ip(const struct addrinfo *addrinfo)
     return (struct in_addr)addr->sin_addr;
 }
 
-struct ping_packet
+void
+print_stat(int signalnum)
 {
-    struct iphdr   ip;
-    struct icmphdr icmp;
-};
+    (void)signalnum;
+    // TODO: std on streaming data:
+    // https://nestedsoftware.com/2018/03/27/calculating-standard-deviation-on-streaming-data-253l.23919.html
+    printf("rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n",
+           min_time_ms,
+           sum_time_ms / recv_count,
+           max_time_ms,
+           0.0);
+}
 
-static int                sock = -1;
-static struct ping_packet send_packet;
-static struct ping_packet recv_packet;
-static struct addrinfo   *destination_addrinfo;
-static struct in_addr     destination_ip_addr;
-static struct in_addr     source_ip_addr;
-static uint16_t           current_sequence = 1;
-static struct timespec    start_time;
-static unsigned long      packet_count = -1;
-static unsigned long      interval = 1;
-static unsigned long      ttl = 64;
+void
+print_stat_and_exit(int signalnum)
+{
+    print_stat(signalnum);
+    exit(EXIT_SUCCESS);
+}
 
 void
 ping(int signalnum)
@@ -166,6 +191,8 @@ main(int argc, char *argv[])
         {
         case 'c':
             packet_count = parse_arg_ulong(optarg);
+            if (packet_count == 0)
+                die("ping: invalid argument: '%s': %s\n", optarg, strerror(ERANGE));
             break;
         case 's':
             break;
@@ -226,6 +253,8 @@ main(int argc, char *argv[])
     destination_ip_addr = addrinfo_to_ip(destination_addrinfo);
     inet_pton(AF_INET, "192.168.1.42", &source_ip_addr);
 
+    signal(SIGQUIT, print_stat);
+    signal(SIGINT, print_stat_and_exit);
     signal(SIGALRM, ping);
     ping(0);
 
@@ -255,9 +284,16 @@ main(int argc, char *argv[])
                ntohs(recv_packet.icmp.un.echo.sequence),
                recv_packet.ip.ttl,
                time_ms);
+        recv_count++;
+        if (time_ms > max_time_ms)
+            max_time_ms = time_ms;
+        if (time_ms < min_time_ms)
+            min_time_ms = time_ms;
+        sum_time_ms += time_ms;
         if (packet_count == 0)
             break;
     }
+    print_stat(0);
 
     freeaddrinfo(destination_addrinfo);
     close(sock);
