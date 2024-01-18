@@ -32,6 +32,7 @@ static struct ping_packet send_packet;
 static struct ping_packet recv_packet;
 static struct addrinfo   *destination_addrinfo;
 static struct in_addr     destination_ip_addr;
+static struct addrinfo   *source_addrinfo;
 static struct in_addr     source_ip_addr;
 static uint16_t           current_sequence = 1;
 static struct timespec    start_time;
@@ -181,6 +182,18 @@ parse_arg_ulong(char *arg)
     return ret;
 }
 
+void
+xgetaddrinfo(const char *node, struct addrinfo **addrinfo)
+{
+    struct addrinfo hints = {0};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = 0;
+    hints.ai_protocol = 0;
+    int err = getaddrinfo(node, NULL, &hints, addrinfo);
+    if (err != 0)
+        die("ping: %s: %s\n", node, gai_strerror(err));
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -226,7 +239,12 @@ main(int argc, char *argv[])
         die("ping: usage error: Destination address required\n");
     char *destination_address = argv[optind];
 
-    // gethostname();
+    char localhost[1024];
+    if (gethostname(localhost, 1024) != 0)
+        die("ping: could not get hostname\n");
+    xgetaddrinfo(localhost, &source_addrinfo);
+    source_ip_addr = addrinfo_to_ip(source_addrinfo);
+
     sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     if (sock == -1)
         die("ping: socket creation failed: %s\n", strerror(errno));
@@ -234,13 +252,7 @@ main(int argc, char *argv[])
     if (setsockopt(sock, IPPROTO_IP, IP_HDRINCL, &on, sizeof(on)) == -1)
         die("ping: setsockopt failed: %s\n", strerror(errno));
 
-    struct addrinfo hints = {0};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = 0;
-    hints.ai_protocol = 0;
-    int err = getaddrinfo(destination_address, NULL, &hints, &destination_addrinfo);
-    if (err != 0)
-        die("ping: %s: %s\n", destination_address, gai_strerror(err));
+    xgetaddrinfo(destination_address, &destination_addrinfo);
     char destination_hostname[1048] = "";
     getnameinfo(destination_addrinfo->ai_addr,
                 destination_addrinfo->ai_addrlen,
@@ -249,9 +261,7 @@ main(int argc, char *argv[])
                 NULL,
                 0,
                 0);
-
     destination_ip_addr = addrinfo_to_ip(destination_addrinfo);
-    inet_pton(AF_INET, "192.168.1.42", &source_ip_addr);
 
     signal(SIGQUIT, print_stat);
     signal(SIGINT, print_stat_and_exit);
